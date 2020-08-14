@@ -907,6 +907,7 @@ return (function () {
         function processScripts(elt) {
             if (matches(elt, "script")) {
                 evalScript(elt);
+                return
             }
             forEach(findAll(elt, "script"), function (script) {
                 evalScript(script);
