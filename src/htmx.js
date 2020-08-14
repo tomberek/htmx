@@ -897,12 +897,10 @@ return (function () {
         }
 
         function evalScript(script) {
-            if (script.type === "text/javascript") {
-                try {
-                    window.Function(script.innerText)();
-                } catch (e) {
-                    logError(e);
-                }
+            try {
+                window.Function(script.innerText)();
+            } catch (e) {
+                logError(e);
             }
         }
 
