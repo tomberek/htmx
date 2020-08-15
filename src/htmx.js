@@ -41,7 +41,10 @@ return (function () {
                 elt.hasAttribute("data-" + qualifiedName));
         }
 
-        function getAttributeValue(elt, qualifiedName) {
+        function getAttributeValue(elt, qualifiedName,i) {
+            if (i > 1) {
+                qualifiedName = qualifiedName + "-" + i
+            }
             return getRawAttribute(elt, qualifiedName) || getRawAttribute(elt, "data-" + qualifiedName);
         }
 
@@ -53,20 +56,20 @@ return (function () {
             return document;
         }
 
-        function getClosestMatch(elt, condition) {
+        function getClosestMatch(elt, condition, i) {
             if (condition(elt)) {
                 return elt;
             } else if (parentElt(elt)) {
-                return getClosestMatch(parentElt(elt), condition);
+                return getClosestMatch(parentElt(elt), condition, i);
             } else {
                 return null;
             }
         }
 
-        function getClosestAttributeValue(elt, attributeName) {
+        function getClosestAttributeValue(elt, attributeName, i) {
             var closestAttr = null;
             getClosestMatch(elt, function (e) {
-                return closestAttr = getAttributeValue(e, attributeName);
+                return closestAttr = getAttributeValue(e, attributeName, i);
             });
             return closestAttr;
         }
@@ -313,10 +316,10 @@ return (function () {
         // Node processing
         //====================================================================
 
-        function getTarget(elt) {
-            var explicitTarget = getClosestMatch(elt, function(e){return getAttributeValue(e,"hx-target") !== null});
+        function getTarget(elt,i) {
+            var explicitTarget = getClosestMatch(elt, function(e){return getAttributeValue(e,"hx-target",i) !== null},i);
             if (explicitTarget) {
-                var targetStr = getAttributeValue(explicitTarget, "hx-target");
+                var targetStr = getAttributeValue(explicitTarget, "hx-target",i);
                 if (targetStr === "this") {
                     return explicitTarget;
                 } else if (targetStr.indexOf("closest ") === 0) {
@@ -551,6 +554,69 @@ return (function () {
                 return swap(swapStyle, elt, target, fragment, settleInfo);
             }
         }
+
+        function doSwap(swapSpec, elt, target, resp, eventDetail, anchor, shouldSaveHistory) {
+            try {
+
+                var activeElt = document.activeElement;
+                var selectionInfo = {
+                    elt: activeElt,
+                    start: activeElt.selectionStart,
+                    end: activeElt.selectionEnd,
+                };
+
+                var settleInfo = makeSettleInfo(target);
+
+                selectAndSwap(swapSpec.swapStyle, target, elt, resp, settleInfo);
+
+                if (!bodyContains(selectionInfo.elt) && selectionInfo.elt.id) {
+                    var newActiveElt = document.getElementById(selectionInfo.elt.id);
+                    if (selectionInfo.start && newActiveElt.setSelectionRange) {
+                        newActiveElt.setSelectionRange(selectionInfo.start, selectionInfo.end);
+                    }
+                    newActiveElt.focus();
+                }
+
+                target.classList.remove(htmx.config.swappingClass);
+                forEach(settleInfo.elts, function (elt) {
+                    if (elt.classList) {
+                        elt.classList.add(htmx.config.settlingClass);
+                    }
+                    triggerEvent(elt, 'htmx:afterSwap', eventDetail);
+                });
+                if (anchor) {
+                    location.hash = anchor;
+                }
+                var doSettle = function(){
+                    forEach(settleInfo.tasks, function (task) {
+                        task.call();
+                    });
+                    forEach(settleInfo.elts, function (elt) {
+                        if (elt.classList) {
+                            elt.classList.remove(htmx.config.settlingClass);
+                        }
+                        triggerEvent(elt, 'htmx:afterSettle', eventDetail);
+                    });
+                    // push URL and save new page
+                    if (shouldSaveHistory) {
+                        var pathToPush = pushedUrl || getPushUrl(elt) || finalPathForGet || path;
+                        pushUrlIntoHistory(pathToPush);
+                        triggerEvent(getDocument().body, 'htmx:pushedIntoHistory', {path:pathToPush});
+                    }
+                    updateScrollState(target, settleInfo.elts, swapSpec);
+                }
+
+                if (swapSpec.settleDelay > 0) {
+                    setTimeout(doSettle, swapSpec.settleDelay)
+                } else {
+                    doSettle();
+                }
+            } catch (e) {
+                triggerErrorEvent(elt, 'htmx:swapError', e);
+                throw e;
+            }
+        }
+
 
         function handleTrigger(elt, trigger) {
             if (trigger) {
@@ -816,25 +882,37 @@ return (function () {
             var eventType = value[1]
 
             if (eventType == undefined) {
-                return
+                value[1] = "message"
             }
 
             var source = htmx.createEventSource(sseSrc);
 
-            source.addEventListener(eventType, function(e) {
+            for (var ii = 1; ii < value.length; ii++) {
+                (function() {
+                    var i = ii
+                source.addEventListener(value[i], function(e) {
+                    if (maybeCloseSSESource(elt)) {
+                        return
+                    }
 
-                if (maybeCloseSSESource(elt)) {
-                    return
-                }
-                
-                var swapSpec = getSwapSpecification(elt)
-                var target = getTarget(elt)
-                var fragment = makeFragment(e.data);
-                var settleInfo = makeSettleInfo(elt);
+                    var swapSpec = getSwapSpecification(elt,i)
+                    var target = getTarget(elt,i)
+                    var resp = e.data;
+                    var eventDetail = {target: target};
 
-                swap(swapSpec.swapStyle, elt, target, fragment, settleInfo)
-            })
-            
+                    var anchor = false
+                    var shouldSaveHistory = false
+
+                    target.classList.add(htmx.config.swappingClass);
+                    if (swapSpec.swapDelay > 0) {
+                        setTimeout(function(){doSwap(swapSpec,elt,target,resp,eventDetail,anchor,shouldSaveHistory)}, swapSpec.swapDelay)
+                    } else {
+                        doSwap(swapSpec,elt,target,resp,eventDetail,anchor,shouldSaveHistory);
+                    }
+                })
+                })()
+            }
+
             source.onerror = function (e) {
                 triggerErrorEvent(elt, "htmx:sseError", {error:e, source:source});
                 maybeCloseSSESource(elt);
@@ -1311,8 +1389,8 @@ return (function () {
             }
         }
 
-        function getSwapSpecification(elt) {
-            var swapInfo = getClosestAttributeValue(elt, "hx-swap");
+        function getSwapSpecification(elt,i) {
+            var swapInfo = getClosestAttributeValue(elt, "hx-swap",i);
             var swapSpec = {
                 "swapStyle" : htmx.config.defaultSwapStyle,
                 "swapDelay" : htmx.config.defaultSwapDelay,
@@ -1519,71 +1597,11 @@ return (function () {
                             var swapSpec = getSwapSpecification(elt);
 
                             target.classList.add(htmx.config.swappingClass);
-                            var doSwap = function () {
-                                try {
-
-                                    var activeElt = document.activeElement;
-                                    var selectionInfo = {
-                                        elt: activeElt,
-                                        start: activeElt.selectionStart,
-                                        end: activeElt.selectionEnd,
-                                    };
-
-                                    var settleInfo = makeSettleInfo(target);
-                                    selectAndSwap(swapSpec.swapStyle, target, elt, resp, settleInfo);
-
-                                    if (!bodyContains(selectionInfo.elt) && selectionInfo.elt.id) {
-                                        var newActiveElt = document.getElementById(selectionInfo.elt.id);
-                                        if (selectionInfo.start && newActiveElt.setSelectionRange) {
-                                            newActiveElt.setSelectionRange(selectionInfo.start, selectionInfo.end);
-                                        }
-                                        newActiveElt.focus();
-                                    }
-
-                                    target.classList.remove(htmx.config.swappingClass);
-                                    forEach(settleInfo.elts, function (elt) {
-                                        if (elt.classList) {
-                                            elt.classList.add(htmx.config.settlingClass);
-                                        }
-                                        triggerEvent(elt, 'htmx:afterSwap', eventDetail);
-                                    });
-                                    if (anchor) {
-                                        location.hash = anchor;
-                                    }
-                                    var doSettle = function(){
-                                        forEach(settleInfo.tasks, function (task) {
-                                            task.call();
-                                        });
-                                        forEach(settleInfo.elts, function (elt) {
-                                            if (elt.classList) {
-                                                elt.classList.remove(htmx.config.settlingClass);
-                                            }
-                                            triggerEvent(elt, 'htmx:afterSettle', eventDetail);
-                                        });
-                                        // push URL and save new page
-                                        if (shouldSaveHistory) {
-                                            var pathToPush = pushedUrl || getPushUrl(elt) || finalPathForGet || path;
-                                            pushUrlIntoHistory(pathToPush);
-                                            triggerEvent(getDocument().body, 'htmx:pushedIntoHistory', {path:pathToPush});
-                                        }
-                                        updateScrollState(target, settleInfo.elts, swapSpec);
-                                    }
-
-                                    if (swapSpec.settleDelay > 0) {
-                                        setTimeout(doSettle, swapSpec.settleDelay)
-                                    } else {
-                                        doSettle();
-                                    }
-                                } catch (e) {
-                                    triggerErrorEvent(elt, 'htmx:swapError', eventDetail);
-                                    throw e;
-                                }
-                            };
 
                             if (swapSpec.swapDelay > 0) {
-                                setTimeout(doSwap, swapSpec.swapDelay)
+                                setTimeout(function(){doSwap(swapSpec,elt,target,resp,eventDetail,anchor,shouldSaveHistory)}, swapSpec.swapDelay)
                             } else {
-                                doSwap();
+                                doSwap(swapSpec,elt,target,resp,eventDetail,anchor,shouldSaveHistory);
                             }
                         }
                     } else {
